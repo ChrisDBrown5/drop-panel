@@ -3,9 +3,10 @@ package com.droppanel;
 import com.droppanel.data.CacheStore;
 import com.droppanel.data.Drop;
 import com.droppanel.data.DropTable;
-import com.droppanel.data.DropTableCache;
 import com.droppanel.data.FilepathCacheStore;
+import com.droppanel.data.TargetStore;
 import com.droppanel.data.WikiClient;
+import com.droppanel.ignore.IgnoreList;
 import com.droppanel.kc.KillCounts;
 import com.droppanel.layout.ClassifyContext;
 import com.droppanel.layout.Classified;
@@ -35,7 +36,12 @@ import javax.inject.Inject;
 import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Actor;
+import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
+import net.runelite.api.KeyCode;
+import net.runelite.api.MenuAction;
+import net.runelite.api.MenuEntry;
+import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.GameState;
 import net.runelite.api.NPC;
 import net.runelite.api.NPCComposition;
@@ -58,6 +64,7 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.util.Filepath;
 import net.runelite.client.util.ImageUtil;
 
 @Slf4j
@@ -88,9 +95,17 @@ public class DropPanelPlugin extends Plugin
 	@Inject
 	private ScheduledExecutorService executor;
 
+	static final int STORE_CAPACITY = 50;
+	static final int AUTO_IGNORE_AFTER = 5;
+	static final String IGNORED_KEY = "ignored";
+	static final String IGNORE_OPTION = "Ignore Drop Checks";
+	static final String UNIGNORE_OPTION = "Unignore Drop Checks";
+
 	private DropPanel panel;
 	private NavigationButton navButton;
-	private DropTableCache cache;
+	/** Created on the executor; every use is also on the executor, so it is ready before first use. */
+	private TargetStore store;
+	private IgnoreList ignoreList;
 	private final CollectionLogIndex index = new CollectionLogIndex();
 	private volatile OwnedStore ownedStore;
 	private CollectionLogSync sync;
@@ -99,13 +114,49 @@ public class DropPanelPlugin extends Plugin
 
 	/** NPC ids with a wiki fetch in flight, so repeated targeting doesn't refetch. */
 	private final Set<Integer> fetching = ConcurrentHashMap.newKeySet();
+	private volatile boolean locked;
 	private volatile int currentNpcId = -1;
+	private volatile String currentName;
 	private volatile DropTable currentTable;
+	/** True when the current NPC is known to have no wiki drop data. */
+	private volatile boolean currentNoData;
+	/** The NPC actor last targeted (client thread only), so re-clicking the same NPC is not a new targeting. */
+	private NPC lastTargetActor;
 
 	@Override
 	protected void startUp()
 	{
-		panel = new DropPanel(itemManager);
+		ignoreList = new IgnoreList(() -> configManager.getConfiguration(CONFIG_GROUP, IGNORED_KEY),
+			value -> configManager.setConfiguration(CONFIG_GROUP, IGNORED_KEY, value), AUTO_IGNORE_AFTER);
+		panel = new DropPanel(itemManager, new DropPanel.Callbacks()
+		{
+			@Override
+			public void lockChanged(boolean isLocked)
+			{
+				locked = isLocked;
+			}
+
+			@Override
+			public void refresh()
+			{
+				refreshCurrent();
+			}
+
+			@Override
+			public void addIgnore(String name)
+			{
+				ignoreList.add(name);
+				showIgnored();
+			}
+
+			@Override
+			public void removeIgnore(String name)
+			{
+				ignoreList.remove(name);
+				showIgnored();
+			}
+		});
+		panel.setIgnored(ignoreList.names());
 		navButton = NavigationButton.builder()
 			.tooltip("Drop Panel")
 			.icon(ImageUtil.loadImageResource(getClass(), "icon.png"))
@@ -114,7 +165,7 @@ public class DropPanelPlugin extends Plugin
 			.build();
 		clientToolbar.addNavigation(navButton);
 
-		cache = new DropTableCache(openCacheStore(), gson, System::currentTimeMillis);
+		executor.execute(() -> store = new TargetStore(openCacheStore(), gson, STORE_CAPACITY));
 		killCounts = new KillCounts(configManager::getRSProfileConfiguration,
 			(key, value) -> configManager.setRSProfileConfiguration(CONFIG_GROUP, key, value));
 		resetOwnedStore();
@@ -149,18 +200,29 @@ public class DropPanelPlugin extends Plugin
 		ownedStore = null;
 		currentTable = null;
 		currentNpcId = -1;
+		currentName = null;
+		currentNoData = false;
+		locked = false;
+		lastTargetActor = null;
 		fetching.clear();
 	}
 
+	/** Runs on the executor. One file, targets.json, in the plugin data directory; the v1 per-NPC folder is removed. */
 	private CacheStore openCacheStore()
 	{
 		try
 		{
-			return new FilepathCacheStore(getPluginDirectory().join("tables"));
+			Filepath dir = getPluginDirectory();
+			Filepath legacy = dir.join("tables");
+			if (legacy.isDirectory())
+			{
+				legacy.deleteRecursively();
+			}
+			return new FilepathCacheStore(dir);
 		}
 		catch (IOException | RuntimeException e)
 		{
-			log.warn("Drop Panel: plugin data directory unavailable, drop tables will not be cached on disk", e);
+			log.warn("Drop Panel: plugin data directory unavailable, drop tables will not be saved to disk", e);
 			Map<String, String> mem = new ConcurrentHashMap<>();
 			return new CacheStore()
 			{
@@ -205,7 +267,7 @@ public class DropPanelPlugin extends Plugin
 	@Subscribe
 	public void onInteractingChanged(InteractingChanged e)
 	{
-		if (e.getSource() != client.getLocalPlayer())
+		if (locked || e.getSource() != client.getLocalPlayer())
 		{
 			return;
 		}
@@ -215,17 +277,32 @@ public class DropPanelPlugin extends Plugin
 			return; // keep the last target when combat ends
 		}
 		NPC npc = (NPC) target;
-		if (!isAttackable(npc))
+		if (!isAttackable(npc) || ignoreList.isIgnored(npc.getName()))
 		{
 			return;
 		}
-		int id = npc.getId();
-		if (id == currentNpcId && currentTable != null)
+		if (npc == lastTargetActor)
 		{
-			return;
+			return; // re-clicking the same NPC is not a new targeting
+		}
+		lastTargetActor = npc;
+
+		int id = npc.getId();
+		if (id == currentNpcId)
+		{
+			if (currentNoData)
+			{
+				countNoDataTarget(npc.getName());
+			}
+			if (currentTable != null || currentNoData || fetching.contains(id))
+			{
+				return; // already showing (or fetching) this monster
+			}
 		}
 		currentNpcId = id;
+		currentName = npc.getName();
 		currentTable = null;
+		currentNoData = false;
 		load(id, npc.getName());
 	}
 
@@ -250,55 +327,171 @@ public class DropPanelPlugin extends Plugin
 		return false;
 	}
 
-	/** Show the cached table at once (if any), and fetch from the wiki when missing or stale. Called on the client thread. */
+	/** Shows the stored entry if there is one; otherwise asks the wiki once. Called on the client thread. */
 	private void load(int npcId, String npcName)
 	{
 		String name = npcName == null ? "Unknown" : npcName;
 		executor.execute(() ->
 		{
-			Optional<DropTable> cached = cache.get(npcId);
-			if (cached.isPresent())
+			Optional<TargetStore.Entry> entry = store.get(npcId);
+			if (entry.isPresent())
 			{
-				setTable(npcId, cached.get());
-				if (!cache.isStale(cached.get()))
+				if (entry.get().isNoData())
 				{
-					return;
+					markNoData(npcId, name);
+					countNoDataTargetLater(name);
 				}
-			}
-			else
-			{
-				SwingUtilities.invokeLater(() ->
+				else
 				{
-					if (panel != null && currentNpcId == npcId)
-					{
-						panel.showLoading(name);
-					}
-				});
-			}
-			if (!fetching.add(npcId))
-			{
+					setTable(npcId, entry.get().getTable());
+				}
 				return;
 			}
-			wikiClient.fetch(npcId, result ->
-			{
-				fetching.remove(npcId);
-				if (result.isPresent())
-				{
-					executor.execute(() -> cache.put(npcId, result.get()));
-					setTable(npcId, result.get());
-				}
-				else if (!cached.isPresent())
-				{
-					SwingUtilities.invokeLater(() ->
-					{
-						if (panel != null && currentNpcId == npcId)
-						{
-							panel.showMessage("No drop data for " + name);
-						}
-					});
-				}
-			});
+			onEdt(npcId, () -> panel.showLoading(name));
+			fetch(npcId, name, false);
 		});
+	}
+
+	/** The refresh button: ask the wiki again for the current monster, replacing what is stored. */
+	private void refreshCurrent()
+	{
+		int npcId = currentNpcId;
+		String name = currentName;
+		if (npcId < 0 || name == null)
+		{
+			return;
+		}
+		if (currentTable == null)
+		{
+			onEdt(npcId, () -> panel.showLoading(name));
+		}
+		fetch(npcId, name, true);
+	}
+
+	private void fetch(int npcId, String name, boolean isRefresh)
+	{
+		if (!fetching.add(npcId))
+		{
+			return;
+		}
+		wikiClient.fetch(npcId, result ->
+		{
+			fetching.remove(npcId);
+			switch (result.getOutcome())
+			{
+				case TABLE:
+					executor.execute(() -> store.putTable(npcId, result.getTable()));
+					setTable(npcId, result.getTable());
+					break;
+				case NO_DATA:
+					executor.execute(() -> store.putNoData(npcId, name));
+					markNoData(npcId, name);
+					if (!isRefresh)
+					{
+						countNoDataTargetLater(name);
+					}
+					break;
+				case ERROR:
+				default:
+					if (currentNpcId == npcId && currentTable == null)
+					{
+						onEdt(npcId, () -> panel.showMessage("Couldn't reach the OSRS Wiki for " + name + ". Press the refresh button to try again."));
+					}
+					else if (isRefresh)
+					{
+						console("Drop Panel: couldn't reach the OSRS Wiki - kept the saved drops for " + name);
+					}
+					break;
+			}
+		});
+	}
+
+	private void markNoData(int npcId, String name)
+	{
+		if (currentNpcId != npcId)
+		{
+			return;
+		}
+		currentTable = null;
+		currentNoData = true;
+		onEdt(npcId, () -> panel.showMessage("No drop data for " + name));
+	}
+
+	private void countNoDataTargetLater(String name)
+	{
+		clientThread.invokeLater(() -> countNoDataTarget(name));
+	}
+
+	/** Client thread. */
+	private void countNoDataTarget(String name)
+	{
+		if (ignoreList.recordNoDataTarget(name))
+		{
+			console("Drop Panel: auto-ignored " + name + " (no wiki drop data after " + AUTO_IGNORE_AFTER + " targets)");
+			showIgnored();
+		}
+	}
+
+	private void showIgnored()
+	{
+		List<String> names = ignoreList.names();
+		SwingUtilities.invokeLater(() ->
+		{
+			if (panel != null)
+			{
+				panel.setIgnored(names);
+			}
+		});
+	}
+
+	/** Runs a panel update on the EDT if the panel still exists and the given NPC is still current. */
+	private void onEdt(int npcId, Runnable r)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			if (panel != null && currentNpcId == npcId)
+			{
+				r.run();
+			}
+		});
+	}
+
+	private void console(String message)
+	{
+		clientThread.invokeLater(() -> client.addChatMessage(ChatMessageType.CONSOLE, "", message, null));
+	}
+
+	@Subscribe
+	public void onMenuEntryAdded(MenuEntryAdded e)
+	{
+		MenuEntry entry = e.getMenuEntry();
+		if (entry.getType() != MenuAction.EXAMINE_NPC || !client.isKeyPressed(KeyCode.KC_SHIFT))
+		{
+			return;
+		}
+		NPC npc = entry.getNpc();
+		if (npc == null || npc.getName() == null)
+		{
+			return;
+		}
+		String name = npc.getName();
+		boolean ignored = ignoreList.isIgnored(name);
+		client.getMenu().createMenuEntry(-1)
+			.setOption(ignored ? UNIGNORE_OPTION : IGNORE_OPTION)
+			.setTarget(entry.getTarget())
+			.setType(MenuAction.RUNELITE)
+			.onClick(me ->
+			{
+				if (ignoreList.isIgnored(name))
+				{
+					ignoreList.remove(name);
+				}
+				else
+				{
+					ignoreList.add(name);
+				}
+				showIgnored();
+			});
 	}
 
 	private void setTable(int npcId, DropTable table)

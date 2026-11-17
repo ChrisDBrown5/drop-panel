@@ -37,14 +37,29 @@ public class WikiClient
 		this.http = http;
 	}
 
-	public void fetch(int npcId, Consumer<Optional<DropTable>> callback)
+	/** What a fetch produced: a table, a definite "the wiki has no drops for this NPC", or a failure to ask. */
+	public enum Outcome
+	{
+		TABLE, NO_DATA, ERROR
+	}
+
+	@lombok.Value
+	public static class Result
+	{
+		Outcome outcome;
+		DropTable table;
+	}
+
+	public void fetch(int npcId, Consumer<Result> callback)
 	{
 		AtomicBoolean called = new AtomicBoolean();
+		// Internally: Optional.of(table) = TABLE, null = ERROR, Optional.empty() = NO_DATA.
 		Consumer<Optional<DropTable>> done = result ->
 		{
 			if (called.compareAndSet(false, true))
 			{
-				callback.accept(result);
+				callback.accept(result == null ? new Result(Outcome.ERROR, null)
+					: result.map(t -> new Result(Outcome.TABLE, t)).orElse(new Result(Outcome.NO_DATA, null)));
 			}
 		};
 		get(WikiQueries.monsterByNpcId(npcId), done, monsterJson ->
@@ -100,7 +115,7 @@ public class WikiClient
 			public void onFailure(Call call, IOException e)
 			{
 				log.debug("wiki request failed", e);
-				fail.accept(Optional.empty());
+				fail.accept(null);
 			}
 
 			@Override
@@ -111,7 +126,7 @@ public class WikiClient
 					if (!response.isSuccessful() || body == null)
 					{
 						log.debug("wiki request returned {}", response.code());
-						fail.accept(Optional.empty());
+						fail.accept(null);
 						return;
 					}
 					onBody.accept(body.string());
@@ -119,7 +134,7 @@ public class WikiClient
 				catch (IOException | RuntimeException e)
 				{
 					log.debug("wiki response handling failed", e);
-					fail.accept(Optional.empty());
+					fail.accept(null);
 				}
 			}
 		});
