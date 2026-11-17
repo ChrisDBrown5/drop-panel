@@ -38,6 +38,8 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.NPC;
 import net.runelite.api.NPCComposition;
+import net.runelite.api.Player;
+import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.InteractingChanged;
@@ -361,21 +363,43 @@ public class DropPanelPlugin extends Plugin
 		return null;
 	}
 
+	/** Counts kills (including ones that drop nothing) of NPCs the player was fighting. */
 	@Subscribe
-	public void onNpcLootReceived(NpcLootReceived e)
+	public void onActorDeath(ActorDeath e)
 	{
-		NPC npc = e.getNpc();
+		if (!(e.getActor() instanceof NPC))
+		{
+			return;
+		}
+		NPC npc = (NPC) e.getActor();
+		Player me = client.getLocalPlayer();
+		if (me == null || (me.getInteracting() != npc && npc.getInteracting() != me))
+		{
+			return;
+		}
 		DropTable table = currentTable;
-		boolean isCurrent = npc != null && npc.getId() == currentNpcId && table != null;
-		String name = isCurrent ? table.getMonsterName() : (npc == null ? null : npc.getName());
+		boolean isCurrent = npc.getId() == currentNpcId && table != null;
+		String name = isCurrent ? table.getMonsterName() : npc.getName();
 		if (name != null)
 		{
 			killCounts.recordKill(name);
 		}
+		if (isCurrent)
+		{
+			rebuild();
+		}
+	}
+
+	@Subscribe
+	public void onNpcLootReceived(NpcLootReceived e)
+	{
+		NPC npc = e.getNpc();
+		boolean isCurrent = npc != null && npc.getId() == currentNpcId && currentTable != null;
 		Set<Integer> distinct = new HashSet<>();
 		for (ItemStack s : e.getItems())
 		{
-			distinct.add(s.getId());
+			// Noted drops (e.g. noted logs or ore) count as the regular item on the drop table.
+			distinct.add(itemManager.canonicalize(s.getId()));
 		}
 		OwnedStore owned = ownedStore;
 		if (owned != null)

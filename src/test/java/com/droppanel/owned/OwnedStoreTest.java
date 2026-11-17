@@ -79,4 +79,34 @@ public class OwnedStoreTest
 		config.put("clCounts", "{nope");
 		assertFalse(new OwnedStore(load, save, gson).owned(12922, true).isKnown());
 	}
+
+	@Test
+	public void chatThenLoot_firstCopyCountsOnce()
+	{
+		store.recordLogPage("Zulrah", Map.of(12922, 0));
+		store.recordNewLogItem(12922);
+		store.recordLoot(12922, 1);
+		assertEquals(1, store.owned(12922, true).getCount());
+	}
+
+	@Test
+	public void lootThenChat_firstCopyCountsOnce_andLaterLootStillCounts()
+	{
+		store.recordLogPage("Zulrah", Map.of(12922, 0));
+		store.recordLoot(12922, 1);
+		store.recordNewLogItem(12922);
+		assertEquals(1, store.owned(12922, true).getCount());
+		store.recordLoot(12922, 1);
+		assertEquals(2, store.owned(12922, true).getCount());
+	}
+
+	@Test
+	public void chatThenLoot_thenSecondDropCounts()
+	{
+		store.recordLogPage("Zulrah", Map.of(12922, 0));
+		store.recordNewLogItem(12922);
+		store.recordLoot(12922, 1);
+		store.recordLoot(12922, 1);
+		assertEquals(2, store.owned(12922, true).getCount());
+	}
 }

@@ -51,6 +51,11 @@ public class ItemView
 		{
 			tip.append("Open your collection log to sync");
 		}
+		else if (!c.isCollectionLogItem())
+		{
+			// Only drops seen while the plugin runs are known for items outside the collection log.
+			tip.append("Seen since install: ").append(count);
+		}
 		else if (count > 0)
 		{
 			tip.append("You: own x").append(count);

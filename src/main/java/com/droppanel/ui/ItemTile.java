@@ -15,6 +15,7 @@ import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
@@ -87,7 +88,12 @@ class ItemTile extends JPanel
 			return l;
 		}
 		AsyncBufferedImage img = itemManager.getImage(v.getItemId());
-		Runnable apply = () -> l.setIcon(new ImageIcon(v.isGreyed() ? ImageUtil.alphaOffset(ImageUtil.grayscaleImage(img), 0.35f) : img));
+		// onLoaded callbacks run off the EDT; hop to Swing before touching the label.
+		Runnable apply = () ->
+		{
+			ImageIcon icon = new ImageIcon(v.isGreyed() ? ImageUtil.alphaOffset(ImageUtil.grayscaleImage(img), 0.35f) : img);
+			SwingUtilities.invokeLater(() -> l.setIcon(icon));
+		};
 		img.onLoaded(apply);
 		apply.run();
 		return l;

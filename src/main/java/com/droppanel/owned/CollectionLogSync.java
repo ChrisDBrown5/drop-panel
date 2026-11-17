@@ -54,6 +54,12 @@ public class CollectionLogSync
 
 	private void readOpenPage()
 	{
+		String localName = client.getLocalPlayer() == null ? null : client.getLocalPlayer().getName();
+		if (!isOwnLog(frameTitle(), localName))
+		{
+			log.debug("skipping collection log sync: not the local player's log");
+			return;
+		}
 		String title = pageTitle();
 		Widget items = client.getWidget(InterfaceID.Collection.ITEMS_CONTENTS);
 		if (title == null || items == null || items.getDynamicChildren() == null)
@@ -105,6 +111,50 @@ public class CollectionLogSync
 			if (!t.isEmpty())
 			{
 				return t;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * A log opened from a POH adventure log is titled "Collection Log - &lt;player&gt;"; only the local player's log is synced.
+	 */
+	static boolean isOwnLog(String frameTitle, String localName)
+	{
+		if (frameTitle == null)
+		{
+			return true;
+		}
+		String t = Text.removeTags(frameTitle).trim();
+		int dash = t.indexOf(" - ");
+		if (dash < 0)
+		{
+			return true;
+		}
+		String owner = t.substring(dash + 3).trim();
+		return localName != null && Text.standardize(owner).equals(Text.standardize(localName));
+	}
+
+	private String frameTitle()
+	{
+		Widget frame = client.getWidget(InterfaceID.Collection.FRAME);
+		if (frame == null)
+		{
+			return null;
+		}
+		for (Widget[] group : new Widget[][]{frame.getDynamicChildren(), frame.getStaticChildren()})
+		{
+			if (group == null)
+			{
+				continue;
+			}
+			for (Widget w : group)
+			{
+				String t = w.getText();
+				if (t != null && Text.removeTags(t).startsWith("Collection Log"))
+				{
+					return t;
+				}
 			}
 		}
 		return null;

@@ -23,15 +23,23 @@ public final class Dryness
 		{
 			return 1;
 		}
-		// Sum P(X = i) for i < need, building each term from the previous one.
-		double term = Math.exp(kills * Math.log1p(-pKill));
-		double below = 0;
-		double ratio = pKill / (1 - pKill);
+		// Sum P(X = i) for i < need in log space, so large kills * pKill cannot underflow.
+		double logRatio = Math.log(pKill) - Math.log1p(-pKill);
+		double logTerm = kills * Math.log1p(-pKill);
+		double maxLog = Double.NEGATIVE_INFINITY;
+		double[] logs = new double[need];
 		for (int i = 0; i < need; i++)
 		{
-			below += term;
-			term = term * (kills - i) / (i + 1) * ratio;
+			logs[i] = logTerm;
+			maxLog = Math.max(maxLog, logTerm);
+			logTerm += Math.log(kills - i) - Math.log(i + 1) + logRatio;
 		}
+		double scaled = 0;
+		for (double l : logs)
+		{
+			scaled += Math.exp(l - maxLog);
+		}
+		double below = Math.exp(maxLog) * scaled;
 		return Math.max(0, Math.min(1, 1 - below));
 	}
 }

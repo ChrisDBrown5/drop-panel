@@ -96,4 +96,14 @@ public class ItemViewTest
 		ItemView v = ItemView.of(new Classified(d, Section.OTHER, false), new Owned(true, 0), 1);
 		assertTrue(v.getTooltipHtml().contains("A &lt;b&gt; &amp; c"));
 	}
+
+	@Test
+	public void nonLogItem_tooltipSaysSeenSinceInstall()
+	{
+		ItemView never = view(Section.RARE, 1 / 5009.0, new Owned(true, 0), 100, false);
+		assertTrue(never.getTooltipHtml(), never.getTooltipHtml().contains("Seen since install: 0"));
+		assertFalse(never.getTooltipHtml().contains("not obtained"));
+		ItemView twice = view(Section.RARE, 1 / 5009.0, new Owned(true, 2), 100, false);
+		assertTrue(twice.getTooltipHtml().contains("Seen since install: 2"));
+	}
 }

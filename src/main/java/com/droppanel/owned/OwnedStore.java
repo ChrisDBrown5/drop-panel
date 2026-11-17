@@ -38,6 +38,8 @@ public class OwnedStore
 	private final Map<String, Set<Integer>> syncedPages;
 	private final Map<Integer, Integer> seen;
 	private final Set<Integer> syncedItems = new HashSet<>();
+	/** Items whose first copy was already counted from the chat message; the matching loot event must not count it again. */
+	private final Set<Integer> countedFromChat = new HashSet<>();
 
 	public OwnedStore(Function<String, String> load, BiConsumer<String, String> save, Gson gson)
 	{
@@ -60,7 +62,12 @@ public class OwnedStore
 
 	public synchronized void recordNewLogItem(int itemId)
 	{
-		clCounts.merge(itemId, 1, Math::max);
+		if (clCounts.getOrDefault(itemId, 0) > 0)
+		{
+			return; // the loot event for this copy arrived first and already counted it
+		}
+		clCounts.put(itemId, 1);
+		countedFromChat.add(itemId);
 		persist(CL_COUNTS, clCounts);
 	}
 
@@ -68,7 +75,11 @@ public class OwnedStore
 	{
 		seen.merge(itemId, times, Integer::sum);
 		persist(SEEN, seen);
-		if (syncedItems.contains(itemId))
+		if (countedFromChat.remove(itemId))
+		{
+			times--;
+		}
+		if (syncedItems.contains(itemId) && times > 0)
 		{
 			clCounts.merge(itemId, times, Integer::sum);
 			persist(CL_COUNTS, clCounts);

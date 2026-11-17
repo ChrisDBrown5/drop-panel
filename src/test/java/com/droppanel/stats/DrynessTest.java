@@ -41,4 +41,11 @@ public class DrynessTest
 	{
 		assertEquals(Dryness.atLeast(10, .1, 1), Dryness.atLeast(10, .1, 0), 0);
 	}
+
+	@Test
+	public void atLeast_largeKillsTimesP_doesNotUnderflow()
+	{
+		assertEquals(0.506887, Dryness.atLeast(3000, 0.3, 900), 1e-4);
+		assertEquals(0.002442, Dryness.atLeast(5000, 0.5, 2600), 1e-5);
+	}
 }
