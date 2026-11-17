@@ -8,6 +8,8 @@ import java.util.regex.Pattern;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
+import net.runelite.api.MenuAction;
+import net.runelite.api.events.ScriptPreFired;
 import net.runelite.api.ScriptID;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.ScriptPostFired;
@@ -23,6 +25,10 @@ import net.runelite.client.util.Text;
 @Slf4j
 public class CollectionLogSync
 {
+	/** Draws one collection log item; args[1] = item id, args[2] = quantity (as used by WikiSync). */
+	static final int DRAW_ITEM_SCRIPT = 4100;
+	/** Script WikiSync runs after toggling search so the search results draw. */
+	static final int SEARCH_INIT_SCRIPT = 2240;
 	private static final Pattern NEW_ITEM = Pattern.compile("^New item added to your collection log: (.+)$");
 
 	private final Client client;
@@ -31,15 +37,81 @@ public class CollectionLogSync
 	/** Resolves an item name to an id via the current drop table, or null. */
 	private final Function<String, Integer> nameToId;
 	private final Runnable changed;
+	private final CollectionLogIndex index;
+
+	/** Full sync state (client thread only): armed after the button is clicked, until captures settle. */
+	private boolean fullSyncArmed;
+	private int lastCaptureTick = -1;
+	private final Map<Integer, Integer> captured = new HashMap<>();
 
 	public CollectionLogSync(Client client, ClientThread clientThread, OwnedStore store, Function<String, Integer> nameToId,
-		Runnable changed)
+		Runnable changed, CollectionLogIndex index)
 	{
 		this.client = client;
 		this.clientThread = clientThread;
 		this.store = store;
 		this.nameToId = nameToId;
 		this.changed = changed;
+		this.index = index;
+	}
+
+	/**
+	 * Called from the in-log button (client thread). Opens the log's search, which draws every obtained item
+	 * through script 4100; those draws are captured until they stop.
+	 */
+	public void startFullSync()
+	{
+		fullSyncArmed = true;
+		lastCaptureTick = client.getTickCount();
+		captured.clear();
+		client.menuAction(-1, InterfaceID.Collection.SEARCH_TOGGLE, MenuAction.CC_OP, 1, -1, "Search", null);
+		client.runScript(SEARCH_INIT_SCRIPT);
+		console("Drop Panel: syncing collection log...");
+	}
+
+	public void onScriptPreFired(ScriptPreFired e)
+	{
+		if (!fullSyncArmed || e.getScriptId() != DRAW_ITEM_SCRIPT || e.getScriptEvent() == null)
+		{
+			return;
+		}
+		Object[] args = e.getScriptEvent().getArguments();
+		if (args == null || args.length < 2 || !(args[1] instanceof Integer))
+		{
+			return;
+		}
+		int itemId = (Integer) args[1];
+		int qty = args.length > 2 && args[2] instanceof Integer ? Math.max(1, (Integer) args[2]) : 1;
+		captured.merge(itemId, qty, Math::max);
+		lastCaptureTick = client.getTickCount();
+	}
+
+	public void onGameTick()
+	{
+		if (!fullSyncArmed || client.getTickCount() < lastCaptureTick + 2)
+		{
+			return;
+		}
+		fullSyncArmed = false;
+		Map<String, Map<Integer, Integer>> pages = FullSync.pageCounts(index.pages(), captured);
+		if (pages.isEmpty())
+		{
+			console("Drop Panel: could not read collection log structure");
+			return;
+		}
+		if (captured.isEmpty())
+		{
+			console("Drop Panel: no collection log items were found - open the log and try again");
+			return;
+		}
+		pages.forEach(store::recordLogPage);
+		console("Drop Panel: collection log synced (" + captured.size() + " items obtained)");
+		changed.run();
+	}
+
+	private void console(String message)
+	{
+		client.addChatMessage(ChatMessageType.CONSOLE, "", message, null);
 	}
 
 	public void onScriptPostFired(ScriptPostFired e)
@@ -54,6 +126,10 @@ public class CollectionLogSync
 
 	private void readOpenPage()
 	{
+		if (fullSyncArmed)
+		{
+			return; // the search view is not a real page; the full sync records everything
+		}
 		String localName = client.getLocalPlayer() == null ? null : client.getLocalPlayer().getName();
 		if (!isOwnLog(frameTitle(), localName))
 		{

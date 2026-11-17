@@ -16,6 +16,7 @@ import com.droppanel.layout.Section;
 import com.droppanel.owned.CollectionLogIndex;
 import com.droppanel.owned.CollectionLogSync;
 import com.droppanel.owned.OwnedStore;
+import com.droppanel.owned.SyncButton;
 import com.droppanel.ui.DropPanel;
 import com.google.gson.Gson;
 import java.io.IOException;
@@ -43,7 +44,9 @@ import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.InteractingChanged;
+import net.runelite.api.events.GameTick;
 import net.runelite.api.events.ScriptPostFired;
+import net.runelite.api.events.ScriptPreFired;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -91,6 +94,7 @@ public class DropPanelPlugin extends Plugin
 	private final CollectionLogIndex index = new CollectionLogIndex();
 	private volatile OwnedStore ownedStore;
 	private CollectionLogSync sync;
+	private SyncButton syncButton;
 	private KillCounts killCounts;
 
 	/** NPC ids with a wiki fetch in flight, so repeated targeting doesn't refetch. */
@@ -115,16 +119,30 @@ public class DropPanelPlugin extends Plugin
 			(key, value) -> configManager.setRSProfileConfiguration(CONFIG_GROUP, key, value));
 		resetOwnedStore();
 
-		if (client.getGameState() == GameState.LOGGED_IN)
+		syncButton = new SyncButton(client, clientThread, () ->
 		{
-			clientThread.invokeLater(() -> index.build(client));
-		}
+			CollectionLogSync s = sync;
+			if (s != null)
+			{
+				s.startFullSync();
+			}
+		});
+		clientThread.invokeLater(() ->
+		{
+			if (client.getGameState() == GameState.LOGGED_IN)
+			{
+				index.build(client);
+			}
+			syncButton.add(); // in case the log is already open
+		});
 	}
 
 	@Override
 	protected void shutDown()
 	{
 		clientToolbar.removeNavigation(navButton);
+		syncButton.remove();
+		syncButton = null;
 		navButton = null;
 		panel = null;
 		sync = null;
@@ -165,7 +183,7 @@ public class DropPanelPlugin extends Plugin
 	{
 		ownedStore = new OwnedStore(key -> configManager.getRSProfileConfiguration(CONFIG_GROUP, key),
 			(key, value) -> configManager.setRSProfileConfiguration(CONFIG_GROUP, key, value), gson);
-		sync = new CollectionLogSync(client, clientThread, ownedStore, this::itemIdByName, this::rebuild);
+		sync = new CollectionLogSync(client, clientThread, ownedStore, this::itemIdByName, this::rebuild, index);
 	}
 
 	@Subscribe
@@ -419,6 +437,31 @@ public class DropPanelPlugin extends Plugin
 		if (s != null)
 		{
 			s.onScriptPostFired(e);
+		}
+		SyncButton b = syncButton;
+		if (b != null)
+		{
+			b.onScriptPostFired(e);
+		}
+	}
+
+	@Subscribe
+	public void onScriptPreFired(ScriptPreFired e)
+	{
+		CollectionLogSync s = sync;
+		if (s != null)
+		{
+			s.onScriptPreFired(e);
+		}
+	}
+
+	@Subscribe
+	public void onGameTick(GameTick e)
+	{
+		CollectionLogSync s = sync;
+		if (s != null)
+		{
+			s.onGameTick();
 		}
 	}
 
