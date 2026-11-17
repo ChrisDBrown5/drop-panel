@@ -96,18 +96,13 @@ public class SyncButton
 	/** Hides only this button's widgets. Safe from any thread. */
 	public void remove()
 	{
-		List<Widget> mine = new ArrayList<>(created);
-		created.clear();
-		if (mine.isEmpty())
-		{
-			return;
-		}
 		clientThread.invoke(() ->
 		{
-			for (Widget w : mine)
+			for (Widget w : created)
 			{
 				w.setHidden(true);
 			}
+			created.clear();
 		});
 	}
 }

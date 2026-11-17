@@ -8,12 +8,15 @@ import java.util.regex.Pattern;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
+import net.runelite.api.GameState;
 import net.runelite.api.MenuAction;
 import net.runelite.api.events.ScriptPreFired;
 import net.runelite.api.ScriptID;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.ScriptPostFired;
 import net.runelite.api.gameval.InterfaceID;
+import net.runelite.api.gameval.VarPlayerID;
+import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.util.Text;
@@ -41,6 +44,10 @@ public class CollectionLogSync
 
 	/** Full sync state (client thread only): armed after the button is clicked, until captures settle. */
 	private boolean fullSyncArmed;
+	private volatile boolean stopped;
+	private String syncOwner;
+	private int expectedItems;
+	private boolean drewSearch;
 	private int lastCaptureTick = -1;
 	private final Map<Integer, Integer> captured = new HashMap<>();
 
@@ -61,6 +68,14 @@ public class CollectionLogSync
 	 */
 	public void startFullSync()
 	{
+		if (stopped || !canReadOwnLog() || index.pages().isEmpty())
+		{
+			console("Drop Panel: open your own collection log before syncing");
+			return;
+		}
+		syncOwner = Text.standardize(client.getLocalPlayer().getName());
+		expectedItems = client.getVarpValue(VarPlayerID.COLLECTION_COUNT);
+		drewSearch = false;
 		fullSyncArmed = true;
 		lastCaptureTick = client.getTickCount();
 		captured.clear();
@@ -71,24 +86,39 @@ public class CollectionLogSync
 
 	public void onScriptPreFired(ScriptPreFired e)
 	{
-		if (!fullSyncArmed || e.getScriptId() != DRAW_ITEM_SCRIPT || e.getScriptEvent() == null)
+		if (stopped || !fullSyncArmed || e.getScriptId() != DRAW_ITEM_SCRIPT || e.getScriptEvent() == null)
 		{
 			return;
 		}
 		Object[] args = e.getScriptEvent().getArguments();
-		if (args == null || args.length < 2 || !(args[1] instanceof Integer))
+		if (args == null || args.length < 3 || !(args[1] instanceof Integer) || !(args[2] instanceof Integer))
 		{
 			return;
 		}
 		int itemId = (Integer) args[1];
-		int qty = args.length > 2 && args[2] instanceof Integer ? Math.max(1, (Integer) args[2]) : 1;
+		int qty = (Integer) args[2];
+		if (itemId <= 0 || qty <= 0 || !index.allItems().contains(itemId))
+		{
+			return;
+		}
 		captured.merge(itemId, qty, Math::max);
 		lastCaptureTick = client.getTickCount();
 	}
 
 	public void onGameTick()
 	{
-		if (!fullSyncArmed || client.getTickCount() < lastCaptureTick + 2)
+		if (stopped || !fullSyncArmed)
+		{
+			return;
+		}
+		if (!canReadOwnLog() || !syncOwner.equals(Text.standardize(client.getLocalPlayer().getName()))
+			|| expectedItems != client.getVarpValue(VarPlayerID.COLLECTION_COUNT))
+		{
+			fullSyncArmed = false;
+			console("Drop Panel: collection log sync interrupted - kept saved counts");
+			return;
+		}
+		if (client.getTickCount() < lastCaptureTick + 2)
 		{
 			return;
 		}
@@ -99,14 +129,30 @@ public class CollectionLogSync
 			console("Drop Panel: could not read collection log structure");
 			return;
 		}
-		if (captured.isEmpty())
+		if (!drewSearch || captured.size() != expectedItems)
 		{
-			console("Drop Panel: no collection log items were found - open the log and try again");
+			console("Drop Panel: collection log capture incomplete - kept saved counts; open the log and try again");
 			return;
 		}
-		pages.forEach(store::recordLogPage);
+		store.recordPages(pages);
 		console("Drop Panel: collection log synced (" + captured.size() + " items obtained)");
 		changed.run();
+	}
+
+	/** Invalidates deferred page reads when the plugin stops or the account changes. */
+	public void stop()
+	{
+		stopped = true;
+	}
+
+	private boolean canReadOwnLog()
+	{
+		return client.getGameState() == GameState.LOGGED_IN && client.getLocalPlayer() != null
+			&& client.getLocalPlayer().getName() != null
+			&& client.getVarbitValue(VarbitID.COLLECTION_POH_HOST_BOOK_OPEN) == 0
+			&& client.getWidget(InterfaceID.Collection.ITEMS_CONTENTS) != null
+			&& !client.getWidget(InterfaceID.Collection.ITEMS_CONTENTS).isHidden()
+			&& isOwnLog(frameTitle(), client.getLocalPlayer().getName());
 	}
 
 	private void console(String message)
@@ -116,8 +162,13 @@ public class CollectionLogSync
 
 	public void onScriptPostFired(ScriptPostFired e)
 	{
-		if (e.getScriptId() != ScriptID.COLLECTION_DRAW_LIST)
+		if (stopped || e.getScriptId() != ScriptID.COLLECTION_DRAW_LIST)
 		{
+			return;
+		}
+		if (fullSyncArmed)
+		{
+			drewSearch = true;
 			return;
 		}
 		// Let the script finish populating the page before reading it.
@@ -126,15 +177,9 @@ public class CollectionLogSync
 
 	private void readOpenPage()
 	{
-		if (fullSyncArmed)
+		if (stopped || fullSyncArmed || !canReadOwnLog())
 		{
 			return; // the search view is not a real page; the full sync records everything
-		}
-		String localName = client.getLocalPlayer() == null ? null : client.getLocalPlayer().getName();
-		if (!isOwnLog(frameTitle(), localName))
-		{
-			log.debug("skipping collection log sync: not the local player's log");
-			return;
 		}
 		String title = pageTitle();
 		Widget items = client.getWidget(InterfaceID.Collection.ITEMS_CONTENTS);
@@ -145,6 +190,10 @@ public class CollectionLogSync
 		Map<Integer, Integer> counts = new HashMap<>();
 		for (Widget w : items.getDynamicChildren())
 		{
+			if (w == null)
+			{
+				continue;
+			}
 			int id = w.getItemId();
 			if (id <= 0)
 			{
@@ -153,7 +202,8 @@ public class CollectionLogSync
 			boolean obtained = w.getOpacity() == 0;
 			counts.put(id, obtained ? Math.max(1, w.getItemQuantity()) : 0);
 		}
-		if (counts.isEmpty())
+		// Search results and interrupted renders are not complete collection-log pages.
+		if (counts.isEmpty() || !index.pageItems(title).map(ids -> ids.equals(counts.keySet())).orElse(false))
 		{
 			return;
 		}
@@ -176,6 +226,10 @@ public class CollectionLogSync
 			{
 				for (Widget k : kids)
 				{
+					if (k == null)
+					{
+						continue;
+					}
 					String t = Text.removeTags(k.getText() == null ? "" : k.getText()).trim();
 					if (!t.isEmpty())
 					{
@@ -199,7 +253,7 @@ public class CollectionLogSync
 	{
 		if (frameTitle == null)
 		{
-			return true;
+			return false;
 		}
 		String t = Text.removeTags(frameTitle).trim();
 		int dash = t.indexOf(" - ");
@@ -226,6 +280,10 @@ public class CollectionLogSync
 			}
 			for (Widget w : group)
 			{
+				if (w == null)
+				{
+					continue;
+				}
 				String t = w.getText();
 				if (t != null && Text.removeTags(t).startsWith("Collection Log"))
 				{
@@ -238,7 +296,7 @@ public class CollectionLogSync
 
 	public void onChatMessage(ChatMessage e)
 	{
-		if (e.getType() != ChatMessageType.GAMEMESSAGE)
+		if (stopped || e.getType() != ChatMessageType.GAMEMESSAGE || e.getMessage() == null)
 		{
 			return;
 		}

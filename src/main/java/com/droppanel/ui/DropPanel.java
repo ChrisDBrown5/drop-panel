@@ -46,6 +46,7 @@ public class DropPanel extends PluginPanel
 	private final ItemManager itemManager;
 	private final Callbacks callbacks;
 	private final JPanel content = new JPanel();
+	private final JPanel heading = new JPanel(new BorderLayout());
 	private final JPanel ignoredList = new JPanel();
 	private boolean locked;
 
@@ -59,6 +60,9 @@ public class DropPanel extends PluginPanel
 		content.setLayout(new BoxLayout(content, BoxLayout.Y_AXIS));
 		content.setOpaque(false);
 		content.setAlignmentX(Component.LEFT_ALIGNMENT);
+		heading.setOpaque(false);
+		heading.setAlignmentX(Component.LEFT_ALIGNMENT);
+		add(heading);
 		add(content);
 		add(ignoreSection());
 
@@ -82,15 +86,27 @@ public class DropPanel extends PluginPanel
 
 	public void showLoading(String monsterName)
 	{
+		setHeader(monsterName, "loading drops...");
 		content.removeAll();
-		content.add(header(monsterName, "loading drops...", false));
 		refresh();
+	}
+
+	public void showStatus(String monsterName, String message)
+	{
+		setHeader(monsterName, "");
+		showMessage(message);
+	}
+
+	private void setHeader(String name, String sub)
+	{
+		heading.removeAll();
+		heading.add(header(name, sub, true), BorderLayout.CENTER);
 	}
 
 	public void show(PanelModel m)
 	{
 		content.removeAll();
-		content.add(header(m.getMonsterName(), m.getKills() + " kills", true));
+		setHeader(m.getMonsterName(), m.getKills() + " kills");
 		for (Map.Entry<Section, List<ItemView>> e : m.getSections().entrySet())
 		{
 			content.add(sectionLabel(e.getKey().getLabel()));

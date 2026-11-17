@@ -65,6 +65,7 @@ public class CollectionLogIndex
 		catch (RuntimeException e)
 		{
 			log.warn("Drop Panel: could not read collection log structure from the game cache", e);
+			return; // Never publish a partial index as if it were the complete log.
 		}
 		pages = p;
 		all = a;

@@ -53,11 +53,22 @@ public class OwnedStore
 
 	public synchronized void recordLogPage(String pageName, Map<Integer, Integer> itemCounts)
 	{
+		recordPages(Map.of(pageName, itemCounts));
+	}
+
+	/** Applies a complete capture with only one pair of configuration writes. */
+	public synchronized void recordPages(Map<String, Map<Integer, Integer>> pages)
+	{
+		pages.forEach(this::applyPage);
+		persist(CL_COUNTS, clCounts);
+		persist(SYNCED_PAGES, syncedPages);
+	}
+
+	private void applyPage(String pageName, Map<Integer, Integer> itemCounts)
+	{
 		syncedPages.put(key(pageName), new HashSet<>(itemCounts.keySet()));
 		syncedItems.addAll(itemCounts.keySet());
 		clCounts.putAll(itemCounts);
-		persist(CL_COUNTS, clCounts);
-		persist(SYNCED_PAGES, syncedPages);
 	}
 
 	public synchronized void recordNewLogItem(int itemId)
@@ -90,7 +101,7 @@ public class OwnedStore
 	{
 		if (collectionLogItem)
 		{
-			return new Owned(syncedItems.contains(itemId), clCounts.getOrDefault(itemId, 0));
+			return new Owned(syncedItems.contains(itemId) || clCounts.getOrDefault(itemId, 0) > 0, clCounts.getOrDefault(itemId, 0));
 		}
 		return new Owned(true, seen.getOrDefault(itemId, 0));
 	}

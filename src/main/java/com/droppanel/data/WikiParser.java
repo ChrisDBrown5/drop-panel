@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.JsonParseException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -30,6 +31,10 @@ public final class WikiParser
 			return Optional.empty();
 		}
 		JsonObject r = rows.get(0).getAsJsonObject();
+		if (str(r, "page_name").isEmpty())
+		{
+			throw new JsonParseException("Wiki monster row has no page name");
+		}
 		return Optional.of(new MonsterRef(str(r, "page_name"), str(r, "page_name_sub")));
 	}
 
@@ -60,7 +65,7 @@ public final class WikiParser
 			}
 			catch (RuntimeException ex)
 			{
-				continue;
+				throw new JsonParseException("Invalid Wiki drop row", ex);
 			}
 			String name = str(r, "item_name");
 			if (name.isEmpty())
@@ -69,7 +74,7 @@ public final class WikiParser
 			}
 			if (name.isEmpty())
 			{
-				continue;
+				throw new JsonParseException("Wiki drop row has no item name");
 			}
 
 			OptionalDouble perRoll = Rarity.parse(str(d, "Rarity"));
@@ -80,7 +85,8 @@ public final class WikiParser
 			double high = doubleOr(d, "Quantity High", Double.NaN);
 			double avgQ = Double.isNaN(low) || Double.isNaN(high) ? 1 : (low + high) / 2;
 
-			merged.computeIfAbsent(name, n -> new Acc()).add(pKill, avgQ);
+			double expectedQuantity = perRoll.orElse(0) * Math.max(1, intOr(d, "Rolls", 1)) * avgQ;
+			merged.computeIfAbsent(name, n -> new Acc()).add(pKill, avgQ, expectedQuantity);
 		}
 
 		List<Drop> out = new ArrayList<>();
@@ -125,7 +131,7 @@ public final class WikiParser
 		for (Drop d : drops)
 		{
 			Integer id = ids.get(d.getItemName().toLowerCase(Locale.ROOT));
-			out.add(new Drop(d.getItemName(), id == null ? -1 : id, d.getPKill(), d.getAvgQuantity()));
+			out.add(new Drop(d.getItemName(), id == null ? -1 : id, d.getPKill(), d.getAvgQuantity(), d.getExpectedQuantityPerKill()));
 		}
 		return out;
 	}
@@ -170,19 +176,13 @@ public final class WikiParser
 
 	private static JsonArray rows(String json)
 	{
-		try
+		JsonElement root = new JsonParser().parse(json);
+		if (!root.isJsonObject() || root.getAsJsonObject().has("error")
+			|| !root.getAsJsonObject().has("bucket") || !root.getAsJsonObject().get("bucket").isJsonArray())
 		{
-			JsonElement root = new JsonParser().parse(json);
-			if (root.isJsonObject() && root.getAsJsonObject().has("bucket") && root.getAsJsonObject().get("bucket").isJsonArray())
-			{
-				return root.getAsJsonObject().getAsJsonArray("bucket");
-			}
+			throw new JsonParseException("Invalid Wiki Bucket response");
 		}
-		catch (RuntimeException ignored)
-		{
-			// fall through to empty
-		}
-		return new JsonArray();
+		return root.getAsJsonObject().getAsJsonArray("bucket");
 	}
 
 	private static String str(JsonObject o, String key)
@@ -243,9 +243,11 @@ public final class WikiParser
 		double weight;
 		double plainQ;
 		int count;
+		double expectedQuantity;
 
-		void add(OptionalDouble p, double q)
+		void add(OptionalDouble p, double q, double expected)
 		{
+			expectedQuantity += expected;
 			count++;
 			plainQ += q;
 			if (p.isPresent())
@@ -264,7 +266,7 @@ public final class WikiParser
 		{
 			OptionalDouble p = unknown ? OptionalDouble.empty() : OptionalDouble.of(Math.min(1, pSum));
 			double q = !unknown && weight > 0 ? weightedQ / weight : plainQ / count;
-			return new Drop(name, -1, p, q);
+			return new Drop(name, -1, p, q, unknown ? 0 : expectedQuantity);
 		}
 	}
 }

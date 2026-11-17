@@ -43,6 +43,31 @@ public class OwnedStoreTest
 	}
 
 	@Test
+	public void newLogItem_isKnownBeforePageSync_andAfterReload()
+	{
+		store.recordNewLogItem(12922);
+		assertEquals(new Owned(true, 1), store.owned(12922, true));
+		assertEquals(new Owned(true, 1), new OwnedStore(load, save, gson).owned(12922, true));
+		assertFalse(store.owned(12932, true).isKnown());
+		assertFalse(store.syncedPageItems("Zulrah").isPresent());
+	}
+
+	@Test
+	public void fullSync_persistsOnlyOncePerMap()
+	{
+		Map<String, Integer> writes = new HashMap<>();
+		OwnedStore batched = new OwnedStore(load, (key, value) ->
+		{
+			writes.merge(key, 1, Integer::sum);
+			config.put(key, value);
+		}, gson);
+		batched.recordPages(Map.of("Zulrah", Map.of(12922, 2), "Other", Map.of(11286, 0)));
+		assertEquals(Map.of("clCounts", 1, "syncedPages", 1), writes);
+		assertEquals(new Owned(true, 2), batched.owned(12922, true));
+		assertEquals(new Owned(true, 0), batched.owned(11286, true));
+	}
+
+	@Test
 	public void loot_incrementsSeenAndSyncedLog()
 	{
 		store.recordLogPage("Zulrah", Map.of(12922, 1));

@@ -33,7 +33,7 @@ public final class Classifier
 			int id = d.getItemId();
 			boolean inLog = ctx.isMonsterPageKnown() ? ctx.getMonsterLogItems().contains(id) : ctx.getAllLogItems().contains(id);
 			logItem[i] = ctx.getAllLogItems().contains(id);
-			ev[i] = d.getPKill().isPresent() ? d.getPKill().getAsDouble() * d.getAvgQuantity() * ctx.getPrice().applyAsInt(id) : 0;
+			ev[i] = d.getExpectedQuantityPerKill() * ctx.getPrice().applyAsInt(id);
 
 			if (TertiaryRules.isTertiary(d.getItemName(), id, ctx.getPetIds()))
 			{

@@ -111,6 +111,8 @@ public class DropPanelPlugin extends Plugin
 	private CollectionLogSync sync;
 	private SyncButton syncButton;
 	private KillCounts killCounts;
+	/** Each enable cycle has its own identity; queued work from old cycles must be ignored. */
+	private volatile Object lifecycle;
 
 	/** NPC ids with a wiki fetch in flight, so repeated targeting doesn't refetch. */
 	private final Set<Integer> fetching = ConcurrentHashMap.newKeySet();
@@ -126,6 +128,8 @@ public class DropPanelPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
+		Object cycle = new Object();
+		lifecycle = cycle;
 		ignoreList = new IgnoreList(() -> configManager.getConfiguration(CONFIG_GROUP, IGNORED_KEY),
 			value -> configManager.setConfiguration(CONFIG_GROUP, IGNORED_KEY, value), AUTO_IGNORE_AFTER);
 		panel = new DropPanel(itemManager, new DropPanel.Callbacks()
@@ -165,7 +169,13 @@ public class DropPanelPlugin extends Plugin
 			.build();
 		clientToolbar.addNavigation(navButton);
 
-		executor.execute(() -> store = new TargetStore(openCacheStore(), gson, STORE_CAPACITY));
+		executor.execute(() ->
+		{
+			if (lifecycle == cycle)
+			{
+				store = new TargetStore(openCacheStore(), gson, STORE_CAPACITY);
+			}
+		});
 		killCounts = new KillCounts(configManager::getRSProfileConfiguration,
 			(key, value) -> configManager.setRSProfileConfiguration(CONFIG_GROUP, key, value));
 		resetOwnedStore();
@@ -178,19 +188,29 @@ public class DropPanelPlugin extends Plugin
 				s.startFullSync();
 			}
 		});
+		SyncButton button = syncButton;
 		clientThread.invokeLater(() ->
 		{
+			if (lifecycle != cycle)
+			{
+				return;
+			}
 			if (client.getGameState() == GameState.LOGGED_IN)
 			{
 				index.build(client);
 			}
-			syncButton.add(); // in case the log is already open
+			button.add(); // in case the log is already open
 		});
 	}
 
 	@Override
 	protected void shutDown()
 	{
+		lifecycle = null;
+		if (sync != null)
+		{
+			sync.stop();
+		}
 		clientToolbar.removeNavigation(navButton);
 		syncButton.remove();
 		syncButton = null;
@@ -243,6 +263,10 @@ public class DropPanelPlugin extends Plugin
 
 	private void resetOwnedStore()
 	{
+		if (sync != null)
+		{
+			sync.stop();
+		}
 		ownedStore = new OwnedStore(key -> configManager.getRSProfileConfiguration(CONFIG_GROUP, key),
 			(key, value) -> configManager.setRSProfileConfiguration(CONFIG_GROUP, key, value), gson);
 		sync = new CollectionLogSync(client, clientThread, ownedStore, this::itemIdByName, this::rebuild, index);
@@ -331,29 +355,53 @@ public class DropPanelPlugin extends Plugin
 	private void load(int npcId, String npcName)
 	{
 		String name = npcName == null ? "Unknown" : npcName;
+		Object cycle = lifecycle;
 		executor.execute(() ->
 		{
-			Optional<TargetStore.Entry> entry = store.get(npcId);
-			if (entry.isPresent())
+			if (cycle == null || lifecycle != cycle)
 			{
-				if (entry.get().isNoData())
-				{
-					markNoData(npcId, name);
-					countNoDataTargetLater(name);
-				}
-				else
-				{
-					setTable(npcId, entry.get().getTable());
-				}
 				return;
 			}
-			onEdt(npcId, () -> panel.showLoading(name));
-			fetch(npcId, name, false);
+			Optional<TargetStore.Entry> entry = store.get(npcId);
+			clientThread.invokeLater(() ->
+			{
+				if (lifecycle != cycle || currentNpcId != npcId)
+				{
+					return;
+				}
+				if (entry.isPresent())
+				{
+					if (entry.get().isNoData())
+					{
+						markNoData(npcId, name);
+						countNoDataTarget(name);
+					}
+					else
+					{
+						setTable(npcId, entry.get().getTable());
+					}
+					return;
+				}
+				onEdt(npcId, () -> panel.showLoading(name));
+				fetch(npcId, name, false);
+			});
 		});
 	}
 
 	/** The refresh button: ask the wiki again for the current monster, replacing what is stored. */
 	private void refreshCurrent()
+	{
+		Object cycle = lifecycle;
+		clientThread.invokeLater(() ->
+		{
+			if (cycle != null && lifecycle == cycle)
+			{
+				refreshCurrentOnClientThread();
+			}
+		});
+	}
+
+	private void refreshCurrentOnClientThread()
 	{
 		int npcId = currentNpcId;
 		String name = currentName;
@@ -370,32 +418,49 @@ public class DropPanelPlugin extends Plugin
 
 	private void fetch(int npcId, String name, boolean isRefresh)
 	{
+		Object cycle = lifecycle;
 		if (!fetching.add(npcId))
 		{
 			return;
 		}
-		wikiClient.fetch(npcId, result ->
+		wikiClient.fetch(npcId, result -> clientThread.invokeLater(() ->
 		{
+			if (cycle == null || lifecycle != cycle)
+			{
+				return;
+			}
 			fetching.remove(npcId);
 			switch (result.getOutcome())
 			{
 				case TABLE:
-					executor.execute(() -> store.putTable(npcId, result.getTable()));
+					executor.execute(() ->
+					{
+						if (lifecycle == cycle)
+						{
+							store.putTable(npcId, result.getTable());
+						}
+					});
 					setTable(npcId, result.getTable());
 					break;
 				case NO_DATA:
-					executor.execute(() -> store.putNoData(npcId, name));
+					executor.execute(() ->
+					{
+						if (lifecycle == cycle)
+						{
+							store.putNoData(npcId, name);
+						}
+					});
 					markNoData(npcId, name);
 					if (!isRefresh)
 					{
-						countNoDataTargetLater(name);
+						countNoDataTarget(name);
 					}
 					break;
 				case ERROR:
 				default:
 					if (currentNpcId == npcId && currentTable == null)
 					{
-						onEdt(npcId, () -> panel.showMessage("Couldn't reach the OSRS Wiki for " + name + ". Press the refresh button to try again."));
+						onEdt(npcId, () -> panel.showStatus(name, "Couldn't reach the OSRS Wiki for " + name + ". Press the refresh button to try again."));
 					}
 					else if (isRefresh)
 					{
@@ -403,7 +468,7 @@ public class DropPanelPlugin extends Plugin
 					}
 					break;
 			}
-		});
+		}));
 	}
 
 	private void markNoData(int npcId, String name)
@@ -414,12 +479,7 @@ public class DropPanelPlugin extends Plugin
 		}
 		currentTable = null;
 		currentNoData = true;
-		onEdt(npcId, () -> panel.showMessage("No drop data for " + name));
-	}
-
-	private void countNoDataTargetLater(String name)
-	{
-		clientThread.invokeLater(() -> countNoDataTarget(name));
+		onEdt(npcId, () -> panel.showStatus(name, "No drop data for " + name));
 	}
 
 	/** Client thread. */
@@ -434,10 +494,11 @@ public class DropPanelPlugin extends Plugin
 
 	private void showIgnored()
 	{
+		Object cycle = lifecycle;
 		List<String> names = ignoreList.names();
 		SwingUtilities.invokeLater(() ->
 		{
-			if (panel != null)
+			if (cycle != null && lifecycle == cycle && panel != null)
 			{
 				panel.setIgnored(names);
 			}
@@ -447,9 +508,10 @@ public class DropPanelPlugin extends Plugin
 	/** Runs a panel update on the EDT if the panel still exists and the given NPC is still current. */
 	private void onEdt(int npcId, Runnable r)
 	{
+		Object cycle = lifecycle;
 		SwingUtilities.invokeLater(() ->
 		{
-			if (panel != null && currentNpcId == npcId)
+			if (cycle != null && lifecycle == cycle && panel != null && currentNpcId == npcId)
 			{
 				r.run();
 			}
@@ -458,7 +520,14 @@ public class DropPanelPlugin extends Plugin
 
 	private void console(String message)
 	{
-		clientThread.invokeLater(() -> client.addChatMessage(ChatMessageType.CONSOLE, "", message, null));
+		Object cycle = lifecycle;
+		clientThread.invokeLater(() ->
+		{
+			if (cycle != null && lifecycle == cycle)
+			{
+				client.addChatMessage(ChatMessageType.CONSOLE, "", message, null);
+			}
+		});
 	}
 
 	@Subscribe
@@ -501,14 +570,20 @@ public class DropPanelPlugin extends Plugin
 			return; // player moved on to another target
 		}
 		currentTable = table;
+		currentNoData = false;
 		rebuild();
 	}
 
 	/** Recompute the panel from the current table. Safe to call from any thread. */
 	private void rebuild()
 	{
+		Object cycle = lifecycle;
 		clientThread.invokeLater(() ->
 		{
+			if (cycle == null || lifecycle != cycle)
+			{
+				return;
+			}
 			DropTable table = currentTable;
 			OwnedStore owned = ownedStore;
 			if (table == null || owned == null)
@@ -548,7 +623,7 @@ public class DropPanelPlugin extends Plugin
 			PanelModel model = new PanelModel(table.getMonsterName(), kills, sections);
 			SwingUtilities.invokeLater(() ->
 			{
-				if (panel != null && currentTable == table)
+				if (lifecycle == cycle && panel != null && currentTable == table && ownedStore == owned)
 				{
 					panel.show(model);
 				}

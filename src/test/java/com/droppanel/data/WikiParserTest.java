@@ -10,6 +10,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalDouble;
+import com.google.gson.JsonParseException;
 import org.junit.Test;
 
 public class WikiParserTest
@@ -93,6 +94,33 @@ public class WikiParserTest
 		double p2 = Rarity.perKill(5 / 249.0, 2);
 		assertEquals((199.5 + p2 * 500) / (1 + p2), scales.getAvgQuantity(), 1e-9);
 		assertEquals(1.0, scales.getPKill().getAsDouble(), 0);
+		assertEquals(199.5 + 2 * 5 / 249.0 * 500, scales.getExpectedQuantityPerKill(), 1e-9);
+		Drop fang = find(WikiParser.drops(fx("drops_Zulrah.json"), "Zulrah"), "Tanzanite fang");
+		assertEquals(2 / 1024.0, fang.getExpectedQuantityPerKill(), 1e-12);
+	}
+
+	@Test(expected = JsonParseException.class)
+	public void malformedResponse_isNotNoData()
+	{
+		WikiParser.monster("<html>Temporarily unavailable</html>");
+	}
+
+	@Test(expected = JsonParseException.class)
+	public void apiError_isNotNoData()
+	{
+		WikiParser.monster("{\"error\":{\"code\":\"ratelimited\"},\"bucket\":[]}");
+	}
+
+	@Test(expected = JsonParseException.class)
+	public void missingBucket_isNotNoData()
+	{
+		WikiParser.drops("{}", "Zulrah");
+	}
+
+	@Test(expected = JsonParseException.class)
+	public void invalidDropRow_isNotNoData()
+	{
+		WikiParser.drops("{\"bucket\":[{\"page_name_sub\":\"Zulrah\",\"drop_json\":\"invalid\"}]}", "Zulrah");
 	}
 
 	@Test

@@ -123,6 +123,7 @@ public class TargetStore
 					x.itemId = drop.getItemId();
 					x.pKill = drop.getPKill().isPresent() ? drop.getPKill().getAsDouble() : null;
 					x.avgQuantity = drop.getAvgQuantity();
+					x.expectedQuantityPerKill = drop.getExpectedQuantityPerKill();
 					d.drops.add(x);
 				}
 			}
@@ -136,7 +137,9 @@ public class TargetStore
 		List<Drop> drops = new ArrayList<>();
 		for (DropDto x : d.drops)
 		{
-			drops.add(new Drop(x.itemName, x.itemId, x.pKill == null ? OptionalDouble.empty() : OptionalDouble.of(x.pKill), x.avgQuantity));
+			OptionalDouble p = x.pKill == null ? OptionalDouble.empty() : OptionalDouble.of(x.pKill);
+			drops.add(new Drop(x.itemName, x.itemId, p, x.avgQuantity,
+				x.expectedQuantityPerKill == null ? p.orElse(0) * x.avgQuantity : x.expectedQuantityPerKill));
 		}
 		return new DropTable(d.npcName, drops, d.fetchedAtMillis);
 	}
@@ -156,5 +159,6 @@ public class TargetStore
 		int itemId;
 		Double pKill;
 		double avgQuantity;
+		Double expectedQuantityPerKill;
 	}
 }

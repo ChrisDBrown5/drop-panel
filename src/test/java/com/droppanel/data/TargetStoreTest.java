@@ -49,6 +49,23 @@ public class TargetStoreTest
 	}
 
 	@Test
+	public void expectedQuantity_survivesDiskReload()
+	{
+		Drop drop = new Drop("Multiple rolls", 1, OptionalDouble.of(0.75), 1, 1.0);
+		DropTable original = new DropTable("Monster", Arrays.asList(drop), 123);
+		new TargetStore(store, gson, 50).putTable(1, original);
+		assertEquals(original, new TargetStore(store, gson, 50).get(1).get().getTable());
+	}
+
+	@Test
+	public void legacyCache_withoutExpectedQuantity_stillLoads()
+	{
+		files.put("targets", "[{\"npcId\":1,\"npcName\":\"Monster\",\"drops\":[{\"itemName\":\"Coins\",\"itemId\":995,\"pKill\":0.5,\"avgQuantity\":20}]}]");
+		Drop drop = new TargetStore(store, gson, 50).get(1).get().getTable().getDrops().get(0);
+		assertEquals(10, drop.getExpectedQuantityPerKill(), 0);
+	}
+
+	@Test
 	public void noDataEntry()
 	{
 		TargetStore s = new TargetStore(store, gson, 50);

@@ -100,6 +100,19 @@ public class ClassifierTest
 	}
 
 	@Test
+	public void highValue_usesAllRollsRatherThanChanceOfAtLeastOne()
+	{
+		prices.put(1, 1000);
+		prices.put(2, 100);
+		List<Drop> drops = filler();
+		drops.add(d("Reference", 1, 1, 1));
+		// Two independent 50% rolls yield one item per kill on average, but only a 75% chance of any.
+		drops.add(new Drop("Multiple rolls", 2, OptionalDouble.of(0.75), 1, 1.0));
+		Map<Section, List<Classified>> m = Classifier.classify(drops, ctx(Set.of(), true, Set.of(), Set.of()));
+		assertEquals(Section.HIGH_VALUE, sectionOf(m, "Multiple rolls"));
+	}
+
+	@Test
 	public void unknownRate_goesToLowAndHasNoEv()
 	{
 		prices.put(5, 1_000_000);

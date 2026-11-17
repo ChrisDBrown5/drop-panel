@@ -10,7 +10,7 @@ public class CollectionLogSyncTest
 	public void ownLog_isSynced()
 	{
 		assertTrue(CollectionLogSync.isOwnLog("Collection Log", "Chris"));
-		assertTrue(CollectionLogSync.isOwnLog(null, "Chris"));
+		assertFalse(CollectionLogSync.isOwnLog(null, "Chris"));
 		assertTrue(CollectionLogSync.isOwnLog("Collection Log - Chris", "Chris"));
 	}
 
