@@ -19,8 +19,9 @@ import net.runelite.api.StructComposition;
 @Slf4j
 public class CollectionLogIndex
 {
-	// Collection log structure in the game cache (as used by community collection log plugins).
-	static final int ENUM_TABS = 2102;
+	// Collection log structure in the game cache (tab structs: bosses, raids, clues, minigames, other),
+	// as used by the Collection Log plugin.
+	static final int[] TAB_STRUCTS = {471, 472, 473, 474, 475};
 	static final int PARAM_TAB_PAGES = 683;
 	static final int PARAM_PAGE_NAME = 689;
 	static final int PARAM_PAGE_ITEMS = 690;
@@ -35,8 +36,7 @@ public class CollectionLogIndex
 		Set<Integer> a = new HashSet<>();
 		try
 		{
-			EnumComposition tabs = client.getEnum(ENUM_TABS);
-			for (int tabStruct : tabs.getIntVals())
+			for (int tabStruct : TAB_STRUCTS)
 			{
 				StructComposition tab = client.getStructComposition(tabStruct);
 				EnumComposition pageEnum = client.getEnum(tab.getIntValue(PARAM_TAB_PAGES));
@@ -74,6 +74,12 @@ public class CollectionLogIndex
 	public Optional<Set<Integer>> pageItems(String pageName)
 	{
 		return Optional.ofNullable(pages.get(pageName.toLowerCase(Locale.ROOT)));
+	}
+
+	/** Lower-cased page name to its item ids. */
+	public Map<String, Set<Integer>> pages()
+	{
+		return pages;
 	}
 
 	public Set<Integer> allItems()
