@@ -1,0 +1,1 @@
+{"bucketQuery":"bucket('infobox_monster').select('page_name','page_name_sub','id').where('id','2042').run()","bucket":[{"page_name_sub":"Zulrah#Serpentine","id":["2042"],"page_name":"Zulrah"}]}
